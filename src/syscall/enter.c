@@ -26,6 +26,11 @@
 #include <linux/net.h>   /* SYS_*, */
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <limits.h>      /* PATH_MAX, */
+#include <unistd.h>		 /* symlink(2) */
+#include <dirent.h>		 /* opendir(2) */
+#include "dir_delete.h"  /* dir_delete */
+#include <sys/mount.h>   /* MS_BIND */
+
 
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
@@ -100,8 +105,19 @@ int translate_syscall_enter(Tracee *tracee)
 	int status2;
 
 	char path[PATH_MAX];
+	char source_path[PATH_MAX];
+	char target_path[PATH_MAX];
+	char mounttype[PATH_MAX];
+	char mountopts[PATH_MAX];
+	char newtype[] = "";
 	char oldpath[PATH_MAX];
 	char newpath[PATH_MAX];
+	char * msg = NULL;
+	char * tempdir1 = NULL;
+	char * tempdir2 = NULL;
+	char * source_path_ptr = NULL;
+	char templatedir1[PATH_MAX];
+	char templatedir2[PATH_MAX];
 
 	word_t syscall_number;
 	bool special = false;
@@ -482,18 +498,171 @@ int translate_syscall_enter(Tracee *tracee)
 		break;
 
 	case PR_mount:
-		status = get_sysarg_path(tracee, path, SYSARG_1);
+		// First we translate paths from guest to host absolute if necessary
+		status = get_sysarg_path(tracee, source_path, SYSARG_1);
 		if (status < 0)
 			break;
 
+		status = get_sysarg_path(tracee, target_path, SYSARG_2);
+		if (status < 0)
+			break;
+
+		status = get_sysarg_path(tracee, mounttype, SYSARG_3);
+		if (status < 0)
+			break;
+
+		flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+		status = get_sysarg_path(tracee, mountopts, SYSARG_5);
+		if (status < 0)
+			break;
+
+		// printf("\nmount(\tsource=%s,\ttarget=%s,\ttype=%s,\tflags=%d\topts=%s)\n", source_path, target_path, mounttype, flags, mountopts);
+
 		/* The following check covers only 90% of the cases. */
-		if (path[0] == '/' || path[0] == '.') {
-			status = translate_path2(tracee, AT_FDCWD, path, SYSARG_1, REGULAR);
+		if (source_path[0] == '/' || source_path[0] == '.') {
+			status = translate_path2(tracee, AT_FDCWD, source_path, SYSARG_1, REGULAR);
 			if (status < 0)
 				break;
 		}
 
 		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
+		if(status < 0)
+			break;
+
+		// if this is a sysfs mount, then we need to do some more special handling
+		if (!strcmp(mounttype,"sysfs")) {
+
+			// TODO: actually implement all this and don't just delete whatever is there....
+			// NOTE: this is probably a bad idea, and should be documented elsewhere...
+			// but this will move the contents of the directory we are attempting to mount sysfs on
+			// top of - the reasoning being in that a rootless container we can never actually mount sysfs anywhere else and 
+			// have to live with the /sys we were given from the outside container
+			// thus as a compromise we check for an environment variable which if true will make a similarly named directory
+			// at the same level, and then move all the contents out of the directory, delete the directory and then create 
+			// a symlink for sys
+
+			// check if the directory actually does exist - if it does we delete the contents before creating the symlink
+			// TODO: check if it's actually just a previously existing symlink in which case we just remove the symlink and not all the files
+			// inside the directory
+			// if(access(target_path, F_OK) != -1) {
+			// 	printf("target exists - deleting...\n");
+
+			// 	// open the directory to see what files are there
+			// 	struct dirent *de;
+			// 	DIR *dr = opendir(target_path);
+			// 	if (dr == NULL) {
+			// 		printf("Could not open current directory");
+			// 		status = -1;
+			// 		break;
+			// 	}
+
+			// 	while ((de = readdir(dr)) != NULL)
+			// 		printf("%s\n", de->d_name);
+
+			// 	closedir(dr);
+			// 	status = dir_delete(target_path);
+			// 	if(status < 0) {
+			// 		status = errno;
+			// 		msg = strerror(status);
+			// 		if(!msg)
+			// 			break;
+			// 		printf("dir_delete failed: %d (%s)\n",status,msg);
+			// 		msg = NULL;
+			// 		break;
+			// 	}
+			// } else {
+			// 	// printf("target doesn't exist\n");
+			// }
+
+			// make a symlink between the target and destination
+			// note we always symlink to /sys - this could be setup as an environment variable
+			// if necessary, but /sys seems like a canonical location for sysfs to be originally mounted
+			status = symlink("/sys", target_path);
+			if(status < 0) {
+				status = errno;
+				msg = strerror(status);
+				if(!msg)
+					break;
+				printf("symlink(%s->%s) failed: %d (%s)\n","/sys",target_path,status,msg);
+				msg = NULL;
+				// TODO: currently, if the symlink fails 
+				// break;
+			}
+
+			// now finally to make the mount syscall actually work we just transform the arguments
+			// into something that will always work - a bind mount of two random directories inside tmpfs
+			tempdir1 = strcpy(templatedir1,"/tmp/FAKE_MOUNTXXXXXX");
+			if(!tempdir1) {
+				status = -1;
+				break;
+			}
+			tempdir2 = strcpy(templatedir2,"/tmp/FAKE_MOUNTXXXXXX");
+			if(!tempdir2) {
+				status = -1;
+				break;
+			}
+			tempdir1 = mkdtemp(templatedir1);
+			if(!tempdir1) {
+				status = -1;
+				break;
+			}
+
+			tempdir2 = mkdtemp(templatedir2);
+			if(!tempdir2) {
+				status = -1;
+				break;
+			}
+
+			// set the tempdir's as the source and target paths for the new fake mount
+			status = translate_path2(tracee, AT_FDCWD, tempdir1, SYSARG_1, REGULAR);
+			if (status < 0)
+				break;
+
+			status = translate_path2(tracee, AT_FDCWD, tempdir2, SYSARG_2, REGULAR);
+			if(status < 0)
+				break;
+			
+			// because it's a bind mount, we don't set the mount type string
+			status = set_sysarg_path(tracee, newtype, SYSARG_3);
+			if(status < 0)
+				break;
+
+			// make the flags for a bind mount
+			poke_reg(tracee, SYSARG_4, MS_BIND);
+
+			// because it's a bind mount, we also don't need to set any options
+			status = set_sysarg_path(tracee, "", SYSARG_5);
+			if(status < 0)
+				break;
+			// tracee->restart_how = PTRACE_CONT;
+
+			// For debugging purposes get all the transformed args to print off
+
+			// status = get_sysarg_path(tracee, source_path, SYSARG_1);
+			// if (status < 0)
+			// 	break;
+
+			// status = get_sysarg_path(tracee, target_path, SYSARG_2);
+			// if (status < 0)
+			// 	break;
+
+			// status = get_sysarg_path(tracee, mounttype, SYSARG_3);
+			// if (status < 0)
+			// 	break;
+
+			// flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+			// status = get_sysarg_path(tracee, mountopts, SYSARG_5);
+			// if (status < 0)
+			// 	break;
+
+			//printf("\nmount(\tsource=%s,\ttarget=%s,\ttype=%s,\tflags=%d\topts=%s)\n", source_path, target_path, mounttype, flags, mountopts);
+
+			break;
+		}
+
+		
 		break;
 
 	case PR_openat:

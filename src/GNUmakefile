@@ -16,13 +16,13 @@ STRIP    = $(CROSS_COMPILE)strip
 OBJCOPY  = $(CROSS_COMPILE)objcopy
 OBJDUMP  = $(CROSS_COMPILE)objdump
 
-CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
+CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -lboost_filesystem -lboost_system
 ifdef PERSISTENT_CHOWN
 	CPPFLAGS += -DPERSISTENT_CHOWN
 	CPPFLAGS += $(shell pkg-config --cflags libprotobuf-c)
 endif
 CFLAGS   += -Wall -Wextra -O2
-LDFLAGS  += -L. -ltalloc -Wl,-z,noexecstack -static
+LDFLAGS  += -L. -ltalloc -Wl,-z,noexecstack -static -lboost_filesystem -lboost_system -lstdc++
 ifdef PERSISTENT_CHOWN
 	LDFLAGS += $(shell pkg-config --libs libprotobuf-c)
 endif
@@ -55,6 +55,7 @@ OBJECTS += \
 	syscall/socket.o	\
 	syscall/heap.o		\
 	syscall/rlimit.o	\
+	syscall/dir_delete.o\
 	tracee/tracee.o		\
 	tracee/mem.o		\
 	tracee/reg.o		\
@@ -175,6 +176,10 @@ USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell egrep -sl 'include[[:space:]]+"b
 $(USE_BUILD_H): build.h
 
 %.o: %.c
+	@mkdir -p $(dir $@)
+	$(COMPILE)
+
+syscall/dir_delete.o: syscall/dir_delete.cpp
 	@mkdir -p $(dir $@)
 	$(COMPILE)
 

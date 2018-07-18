@@ -152,6 +152,28 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		break;
 	}
 
+
+	/* Handle links in "/proc/<PID>/ns/".  */
+	status = snprintf(proc_path, sizeof(proc_path), "/proc/%d/ns", pid);
+	if (status < 0 || (size_t) status >= sizeof(proc_path))
+		return -EPERM;
+
+	comparison = compare_paths(proc_path, base);
+	switch (comparison) {
+	case PATHS_ARE_EQUAL:
+		/* Don't dereference "/proc/<PID>/ns/???" now: they
+		 * are handled by the kernel.  */
+		status = snprintf(result, PATH_MAX, "%s/%s", base, component);
+		if (status < 0 || status >= PATH_MAX)
+			return -EPERM;
+
+		return DONT_CANONICALIZE;
+
+	default:
+		break;
+	}
+
+
 	return DEFAULT;
 }
 
